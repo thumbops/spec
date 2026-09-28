@@ -1,0 +1,240 @@
+# Agent–backend protocol
+
+Sep 25, 2026 · @Simone Bernardello
+
+## Principles
+
+The agent always opens the connections, over HTTPS to the backend: the cluster exposes nothing and no inbound ports need to be opened.
+
+- **Authentication**: a bootstrap token only for registration, then mTLS with one certificate per cluster. The certificate CN is the `cluster_id`, so calls do not repeat it in the path.
+- **Format**: JSON, timestamps in RFC 3339 UTC, IDs as UUIDs.
+- **Versioning**: `/v1` prefix in the path. The agent sends its own version on every call (`User-Agent: thumbops-agent/1.2.0`) and the backend states the minimum supported version.
+- **Base URL**: `https://agent.thumbops.mobiletechnologies.cloud/v1`.
+
+The reverse proxy (Caddy or Traefik) verifies the client certificate and passes the CN to the service in an internal header. The service accepts that header only from the proxy, never directly from outside.
+
+| Endpoint | Method | Authentication | Frequency |
+| --- | --- | --- | --- |
+| `/v1/register` | POST | Bootstrap token | Once |
+| `/v1/agent/certificate` | POST | mTLS | Before the certificate expires |
+| `/v1/agent/heartbeat` | PUT | mTLS | Every 60 s |
+| `/v1/agent/actions` | GET | mTLS | Continuous, long polling |
+| `/v1/agent/actions/{id}/claim` | POST | mTLS | For every action received |
+| `/v1/agent/actions/{id}/result` | POST | mTLS | When execution ends |
+| `/v1/agent/status` | PUT | mTLS | Every 60 s and on request |
+
+## Registration and certificate
+
+The agent generates its own private key, which never leaves the cluster: the backend only signs a CSR.
+
+1. A cluster is created in the backend from the app or the CLI, which returns a single-use bootstrap token valid for 1 hour.
+2. The token is put in a Secret and the agent is installed (Helm chart).
+3. At startup the agent generates an Ed25519 key, saves it in a Secret and calls `POST /v1/register`.
+4. The backend invalidates the token and returns the signed certificate.
+
+Request (`Authorization: Bearer <bootstrap token>`):
+
+```json
+{
+  "csr": "-----BEGIN CERTIFICATE REQUEST-----...",
+  "agent_version": "0.1.0",
+  "kubernetes_version": "v1.34.3",
+  "cluster_uid": "<uid of the kube-system namespace>"
+}
+```
+
+Response:
+
+```json
+{
+  "cluster_id": "8c1f0e7a-...",
+  "certificate": "-----BEGIN CERTIFICATE-----...",
+  "ca_chain": "-----BEGIN CERTIFICATE-----...",
+  "expires_at": "2026-10-25T10:00:00Z"
+}
+```
+
+The `cluster_uid` lets the backend recognize the same cluster if the agent is reinstalled. The certificate lasts 30 days; when less than a third is left, the agent sends a new CSR to `POST /v1/agent/certificate`, authenticating with the still valid one. Revoking a cluster in the backend makes the certificate unusable on the next call.
+
+Renewal happens only while the certificate is still valid. If the agent cannot reach the backend for the whole last third of the validity (agent stopped, network or backend down for more than 10 days), the certificate expires and can no longer be renewed: a new registration is needed. A certificate that is expired, revoked or signed by a CA the backend does not know is rejected by the reverse proxy already during the TLS handshake, so the agent receives a TLS alert rather than a `401`: it treats it as a `401` (see "Errors and retries").
+
+## Heartbeat
+
+Every 60 seconds the agent calls `PUT /v1/agent/heartbeat`; after 3 minutes without a heartbeat the backend marks the cluster as offline and shows it in the app.
+
+Request:
+
+```json
+{
+  "agent_version": "0.1.0",
+  "kubernetes_version": "v1.34.3",
+  "nodes": { "ready": 6, "total": 6 },
+  "permissions": {
+    "rollout-restart": true,
+    "scale": true,
+    "cordon-drain": false
+  },
+  "last_action_id": "3b2d..."
+}
+```
+
+The `permissions` block is the result of a `SelfSubjectAccessReview` made by the agent: the app can thus disable in advance the actions that would fail for lack of RBAC.
+
+Response:
+
+```json
+{
+  "server_time": "2026-09-25T10:00:00Z",
+  "poll": { "interval_seconds": 0, "wait_seconds": 20 },
+  "min_agent_version": "0.1.0"
+}
+```
+
+With `poll` the backend tunes polling without having to upgrade the agent. `server_time` lets the agent correct skewed clocks when it checks action deadlines.
+
+## Receiving actions
+
+The agent uses long polling: the request stays open for up to 20 seconds, and an approved action usually arrives in under a second.
+
+As soon as it receives a response, the agent reopens the request immediately. Reverse proxy and service must have timeouts longer than the wait, for example 30 seconds. Through the heartbeat's `poll` block the backend can reduce `wait_seconds` or switch to plain polling, for example if part of the service ended up on a platform that charges for waiting time.
+
+Call: `GET /v1/agent/actions?wait=20`. Response `204` if nothing is there when the wait ends, otherwise `200`:
+
+```json
+{
+  "actions": [
+    {
+      "action_id": "3b2d...",
+      "type": "scale",
+      "params": {
+        "namespace": "payments",
+        "deployment": "payments-api",
+        "replicas": 6
+      },
+      "runbook": "payments/scale-api@4f2a91c",
+      "requested_by": "u_123",
+      "approved_by": ["u_456"],
+      "expires_at": "2026-09-25T10:02:00Z"
+    }
+  ]
+}
+```
+
+In the MVP the list contains at most one action. `runbook` names the file and Git commit the action comes from, for auditing. `expires_at` is set to 2 minutes after approval: an action left in the queue while the agent was offline is no longer run.
+
+Parameters per action type, already resolved by the backend from the runbook and the user's choices:
+
+| Action | Parameters |
+| --- | --- |
+| `rollout-restart` | `namespace`, `deployment` |
+| `scale` | `namespace`, `deployment`, `replicas` (already checked to be between the runbook's `min` and `max`) |
+| `cordon`, `uncordon` | `node` |
+| `drain` | `node`, `timeout_seconds` (default 600), `delete_emptydir_data` (default false) |
+
+In the runbook the drain fields are called `timeoutSeconds` and `deleteEmptyDirData`, as in Kubernetes resources; in the protocol they follow the snake\_case convention of the other messages.
+
+## Execution and results
+
+Before running, the agent claims the action with `POST /v1/agent/actions/{id}/claim`; only a successful claim authorizes execution.
+
+The claim responds `200` if the action is still valid, `409` if it has already been claimed, `410` if it has expired or been canceled. When done, the agent sends `POST /v1/agent/actions/{id}/result`:
+
+```json
+{
+  "status": "succeeded",
+  "started_at": "2026-09-25T10:00:12Z",
+  "finished_at": "2026-09-25T10:00:14Z",
+  "message": "payments/payments-api scaled from 3 to 6 replicas",
+  "details": { "previous_replicas": 3, "replicas": 6 }
+}
+```
+
+`status` is `succeeded`, `failed` (Kubernetes API error) or `rejected` (the agent refused the action, see the next section). For a restart, the result arrives when the rollout has started, not when it has completed; rollout status is a possible later improvement.
+
+| State | Set by | Meaning |
+| --- | --- | --- |
+| `requested` | Backend | Requested from the app, waiting for approval if needed |
+| `approved` | Backend | Ready, visible to the agent until `expires_at` |
+| `claimed` | Agent (claim) | Running |
+| `succeeded` / `failed` / `rejected` | Agent (result) | Finished |
+| `expired` | Backend | Not claimed before the deadline, or claimed without a result within 5 minutes |
+| `cancelled` | Backend | Canceled by the user before the claim |
+
+Every state change produces an audit log entry and a notification to the user who requested the action.
+
+## Errors, idempotency and defense in depth
+
+The agent does not blindly trust the backend: it runs only actions that its own local policy also allows, so a compromised backend cannot do anything outside those limits.
+
+**Local policy.** A ConfigMap managed by the cluster team lists the allowed action types, namespaces and limits (for example `scale` up to 20 replicas at most). An action outside the policy is rejected with `status: rejected`. On top of that, the agent's ServiceAccount has RBAC limited to the verbs it needs.
+
+**Idempotency.** Every action is identified by `action_id`. The agent annotates the modified resource with `thumbops.mobiletechnologies.cloud/last-action-id`: if it finds that ID already there, it does not repeat the action and sends the result again. This covers the case where the agent restarts between execution and sending the result.
+
+In the prototype the annotation with the ID and a second annotation with the result (`thumbops.mobiletechnologies.cloud/last-action-result`) are written in the same patch that applies the change, so a change can never exist without the trace that makes it idempotent. The drain is the exception: it is made of several steps and writes the annotation only at the end, but repeating it on an already drained node has no effect.
+
+**Errors and retries.**
+
+| Code | Meaning | Agent behavior |
+| --- | --- | --- |
+| `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed |
+| `409` / `410` | Action already claimed or expired | Discards it |
+| `426` | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
+| `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s |
+
+Sending the `result` is retried until it succeeds, keeping the result in memory and in the resource annotation.
+
+The TLS alerts equivalent to a `401` are the ones a server uses to reject the client certificate (RFC 8446, §6.2): `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_expired`, `certificate_unknown`, `unknown_ca`, `certificate_required`. Other network and TLS errors, including a server certificate the agent does not recognize, are temporary and are retried with backoff.
+
+**Certificate change.** The client certificate is presented only at the TLS handshake, and with long polling the connection to the backend is never idle. After registration and after every renewal the agent must therefore open new connections, otherwise it keeps presenting no certificate or the old one. The prototype does this, and a test covers it.
+
+## Cluster status
+
+Every 60 seconds the agent sends a compact status summary with `PUT /v1/agent/status`; the backend keeps the latest summary of each cluster for the dashboard.
+
+The agent collects the data with client-go informers (watch), without querying the API server on every cycle. If metrics-server is in the cluster, it adds real CPU and memory usage; otherwise the `used` fields are `null`.
+
+```json
+{
+  "collected_at": "2026-09-28T10:00:00Z",
+  "resources": {
+    "cpu": { "allocatable_m": 23520, "requested_m": 15800, "used_m": null },
+    "memory": { "allocatable_mib": 92160, "requested_mib": 61440, "used_mib": null }
+  },
+  "nodes": {
+    "total": 6, "ready": 5, "cordoned": 1,
+    "items": [
+      {
+        "name": "ip-10-0-1-12",
+        "ready": false,
+        "unschedulable": false,
+        "conditions": ["MemoryPressure"],
+        "cpu": { "allocatable_m": 3920, "requested_m": 3100 },
+        "memory": { "allocatable_mib": 15360, "requested_mib": 12288 }
+      }
+    ]
+  },
+  "workloads": {
+    "unhealthy_pods": [
+      { "namespace": "payments", "name": "payments-api-7d9f-x2k", "reason": "CrashLoopBackOff", "restarts": 14 }
+    ],
+    "degraded_deployments": [
+      { "namespace": "payments", "name": "payments-api", "ready": 1, "desired": 3 }
+    ]
+  },
+  "truncated": false
+}
+```
+
+**Size limits.** The node list is complete up to 100 nodes; beyond that, the agent sends only the nodes with problems plus the aggregates. Pods and deployments with problems are limited to the first 20 each, sorted by severity. When something is cut, `truncated` is `true` and the app shows it.
+
+**On-demand refresh.** When the user asks for a refresh from the app, the response of `GET /v1/agent/actions` includes `"status_requested": true`. The agent sends a new summary right away; with long polling the data arrives within a couple of seconds.
+
+**Excluded namespaces.** The agent's local policy can list namespaces to exclude (`status.exclude_namespaces`): their pods and deployments are never sent to the backend.
+
+**Permissions.** For the status the agent uses a read-only ClusterRole (`get`, `list`, `watch`) on nodes, pods, events and deployments, plus `get` on the `metrics.k8s.io` metrics. It is separate from the role used for actions, so the agent can also be installed for the dashboard only.
+
+## Open questions
+
+- Merge heartbeat and polling into a single call to halve the requests, or keep them separate for simplicity?
+- A drain can take minutes: is an intermediate result (`progress`) needed, or is a longer timeout for that action type enough?
+- Where does the CA that signs agent certificates live: AWS Private CA (fixed monthly cost) or a self-managed CA with the key in KMS?

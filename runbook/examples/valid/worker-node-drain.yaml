@@ -2,7 +2,7 @@ apiVersion: thumbops.mobiletechnologies.cloud/v1
 kind: Runbook
 metadata:
   name: worker-node-drain
-  description: Svuota un nodo worker con problemi, rispettando i PodDisruptionBudget
+  description: Drain a faulty worker node, honoring PodDisruptionBudgets
 spec:
   target:
     clusters:

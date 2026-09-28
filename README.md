@@ -1,21 +1,21 @@
 # ThumbOps spec
 
-Contratti pubblici di [ThumbOps](https://github.com/thumbops): il protocollo tra
-l'agente nel cluster e il backend, e il formato dei runbook.
+Public contracts of [ThumbOps](https://github.com/thumbops): the protocol
+between the in-cluster agent and the backend, and the runbook format.
 
-| Percorso | Contenuto |
+| Path | Content |
 | --- | --- |
-| [`protocol/protocollo.md`](protocol/protocollo.md) | Protocollo agente–backend v1 |
-| [`runbook/schema.md`](runbook/schema.md) | Formato e regole dei runbook |
-| [`runbook/runbook.schema.json`](runbook/runbook.schema.json) | JSON Schema dei runbook |
-| [`runbook/validate.py`](runbook/validate.py) | Validatore per la CI |
+| [`protocol/protocol.md`](protocol/protocol.md) | Agent–backend protocol v1 |
+| [`runbook/schema.md`](runbook/schema.md) | Runbook format and rules |
+| [`runbook/runbook.schema.json`](runbook/runbook.schema.json) | Runbook JSON Schema |
+| [`runbook/validate.py`](runbook/validate.py) | Validator for CI |
 
-## Validare i propri runbook
+## Validating your runbooks
 
 ```
 pip install -r runbook/requirements.txt
-python3 runbook/validate.py path/ai/runbook/
+python3 runbook/validate.py path/to/runbooks/
 ```
 
-Esce con codice 1 se almeno un runbook non è valido, quindi si può usare
-direttamente in una pipeline.
+It exits with code 1 if at least one runbook is invalid, so it can be used
+directly in a pipeline.

@@ -1,19 +1,19 @@
-# Schema dei runbook
+# Runbook schema
 
 Sep 28, 2026 · @Simone Bernardello
 
-## Struttura di un runbook
+## Structure of a runbook
 
-Un runbook autorizza una sola azione su un insieme di cluster e risorse, con limiti e regole di approvazione fissati in anticipo; tutto ciò che non è dichiarato è vietato.
+A runbook authorizes a single action on a set of clusters and resources, with limits and approval rules fixed in advance; anything not declared is forbidden.
 
-Il formato riprende quello delle risorse Kubernetes (`apiVersion`, `kind`, `metadata`, `spec`), così chi lo scrive ritrova una struttura familiare e in futuro lo si potrà trasformare in una CRD senza cambiarlo.
+The format follows Kubernetes resources (`apiVersion`, `kind`, `metadata`, `spec`), so whoever writes it finds a familiar structure, and in the future it can become a CRD without changes.
 
 ```yaml
 apiVersion: thumbops.mobiletechnologies.cloud/v1
 kind: Runbook
 metadata:
   name: payments-api-restart
-  description: Riavvia payments-api quando i pod vanno in crash
+  description: Restart payments-api when its pods crash
   owner: team-payments
 spec:
   alerts:
@@ -29,75 +29,75 @@ spec:
   cooldown: 10m
 ```
 
-Un file contiene un solo runbook. Il repository tipico ha una cartella per team (`runbooks/payments/`, `runbooks/platform/`), e il campo `owner` rende esplicito chi ne è responsabile.
+A file contains a single runbook. A typical repository has one directory per team (`runbooks/payments/`, `runbooks/platform/`), and the `owner` field makes explicit who is responsible for it.
 
-## Campi
+## Fields
 
-Sono obbligatori `metadata.name`, `spec.target.clusters`, `spec.action` e `spec.approval`; qualsiasi campo non elencato qui rende il runbook non valido.
+`metadata.name`, `spec.target.clusters`, `spec.action` and `spec.approval` are required; any field not listed here makes the runbook invalid.
 
-| Campo | Obbligatorio | Valori ammessi |
+| Field | Required | Allowed values |
 | --- | --- | --- |
-| `metadata.name` | Sì | Nome DNS minuscolo, max 63 caratteri, unico nel repository |
-| `metadata.description` | No | Testo, max 200 caratteri; appare nell'app |
-| `metadata.owner` | No | Team o persona responsabile |
-| `spec.alerts[].match` | No | Etichette dell'alert da confrontare (es. `alertname`, `namespace`); max 20 regole. Senza alert, il runbook è disponibile solo dalla dashboard |
-| `spec.target.clusters.matchLabels` | Sì | Etichette dei cluster registrati (es. `env: prod`) |
-| `spec.target.namespace` | Per restart e scale | Nome del namespace |
-| `spec.target.deployment` | Per restart e scale | Nome del deployment |
-| `spec.target.nodes.matchLabels` | Per cordon, uncordon, drain | Etichette dei nodi su cui l'azione è ammessa |
-| `spec.action.type` | Sì | `rollout-restart`, `scale`, `cordon`, `uncordon`, `drain` |
-| `spec.action.params` | Per scale; facoltativo per drain | Scale: `min` e `max` repliche (0–1000). Drain: `timeoutSeconds` (30–3600, default 600), `deleteEmptyDirData` (default false) |
-| `spec.approval` | Sì | `single` oppure `two-person` |
-| `spec.cooldown` | No | Durata come `30s`, `10m`, `1h`; minimo 1 minuto |
+| `metadata.name` | Yes | Lowercase DNS name, max 63 characters, unique in the repository |
+| `metadata.description` | No | Text, max 200 characters; shown in the app |
+| `metadata.owner` | No | Responsible team or person |
+| `spec.alerts[].match` | No | Alert labels to match (e.g. `alertname`, `namespace`); max 20 rules. Without alerts, the runbook is available only from the dashboard |
+| `spec.target.clusters.matchLabels` | Yes | Labels of the registered clusters (e.g. `env: prod`) |
+| `spec.target.namespace` | For restart and scale | Namespace name |
+| `spec.target.deployment` | For restart and scale | Deployment name |
+| `spec.target.nodes.matchLabels` | For cordon, uncordon, drain | Labels of the nodes the action is allowed on |
+| `spec.action.type` | Yes | `rollout-restart`, `scale`, `cordon`, `uncordon`, `drain` |
+| `spec.action.params` | For scale; optional for drain | Scale: `min` and `max` replicas (0–1000). Drain: `timeoutSeconds` (30–3600, default 600), `deleteEmptyDirData` (default false) |
+| `spec.approval` | Yes | `single` or `two-person` |
+| `spec.cooldown` | No | Duration such as `30s`, `10m`, `1h`; minimum 1 minute |
 
-Nello scale l'utente sceglie il numero di repliche nell'app, ma solo tra `min` e `max`. Nel drain, `deleteEmptyDirData` resta falso per default perché cancellare i volumi `emptyDir` può far perdere dati temporanei.
+For scale the user picks the number of replicas in the app, but only between `min` and `max`. For drain, `deleteEmptyDirData` is false by default because deleting `emptyDir` volumes can lose temporary data.
 
-## Regole di validazione
+## Validation rules
 
-La validazione ha due livelli: un JSON Schema (draft 2020-12) per struttura e valori, e pochi controlli semantici in codice per le regole che lo schema non esprime bene.
+Validation has two levels: a JSON Schema (draft 2020-12) for structure and values, and a few semantic checks in code for the rules the schema does not express well.
 
-**Nello schema:**
+**In the schema:**
 
-- Nessun campo aggiuntivo in nessun punto, così un runbook non può contenere comandi o parametri non previsti.
-- Lo schema dell'azione è scelto in base a `type`, così l'errore indica il campo sbagliato invece di un generico "nessuno schema corrisponde".
-- Coerenza tra azione e bersaglio: restart e scale richiedono `namespace` e `deployment` e vietano `nodes`; cordon, uncordon e drain richiedono `nodes` e vietano `namespace` e `deployment`.
-- Nomi e etichette seguono le regole di Kubernetes (nomi DNS, chiavi e valori delle label).
+- No additional fields anywhere, so a runbook cannot contain unexpected commands or parameters.
+- The action schema is chosen based on `type`, so the error names the wrong field instead of a generic "no schema matches".
+- Consistency between action and target: restart and scale require `namespace` and `deployment` and forbid `nodes`; cordon, uncordon and drain require `nodes` and forbid `namespace` and `deployment`.
+- Names and labels follow the Kubernetes rules (DNS names, label keys and values).
 
-**Controlli semantici:**
+**Semantic checks:**
 
-- In `scale`, `min` non può superare `max`.
-- `cooldown` non può essere inferiore a 1 minuto.
-- `metadata.name` deve essere unico tra tutti i file validati insieme.
+- In `scale`, `min` cannot exceed `max`.
+- `cooldown` cannot be less than 1 minute.
+- `metadata.name` must be unique across all the files validated together.
 
-Casi usati per testare lo schema, tutti respinti con l'errore indicato:
+Cases used to test the schema, all rejected with the error shown:
 
-| Caso | Errore restituito |
+| Case | Error returned |
 | --- | --- |
-| Campo `command` aggiunto a un rollout-restart | `spec.action`: campo aggiuntivo non ammesso (`command`) |
-| Azione `delete-namespace` | `spec.action.type`: valore non tra quelli ammessi |
-| Scale su `nodes` invece che su un deployment | `spec.target`: mancano `namespace` e `deployment`, `nodes` non ammesso |
-| Drain su un namespace | `spec.target`: manca `nodes`, `namespace` non ammesso |
-| Scale con `min: 8`, `max: 3` e cooldown `10s` | Min maggiore di max; cooldown sotto il minimo |
-| Nome `Payments_API` e approvazione `always` | Nome non valido; approvazione non tra quelle ammesse |
-| Due file con lo stesso `metadata.name` | Nome già usato nel primo file |
+| `command` field added to a rollout-restart | `spec.action`: additional field not allowed (`command`) |
+| `delete-namespace` action | `spec.action.type`: value not among the allowed ones |
+| Scale on `nodes` instead of a deployment | `spec.target`: `namespace` and `deployment` missing, `nodes` not allowed |
+| Drain on a namespace | `spec.target`: `nodes` missing, `namespace` not allowed |
+| Scale with `min: 8`, `max: 3` and cooldown `10s` | Min greater than max; cooldown below the minimum |
+| Name `Payments_API` and approval `always` | Invalid name; approval not among the allowed ones |
+| Two files with the same `metadata.name` | Name already used in the first file |
 
-Tre runbook validi (restart con doppia approvazione, scale con limiti, drain su nodi di staging) passano senza errori. Lo script esce con codice 1 quando almeno un runbook non è valido, quindi basta aggiungerlo alla pipeline.
+Three valid runbooks (restart with two-person approval, scale with limits, drain on staging nodes) pass without errors. The script exits with code 1 when at least one runbook is invalid, so it can simply be added to the pipeline.
 
-## Dove avvengono i controlli
+## Where the checks happen
 
-Lo stesso runbook viene controllato in tre punti, e ognuno blocca un tipo diverso di errore: nessuno dei tre si fida del precedente.
+The same runbook is checked in three places, and each one blocks a different kind of error: none of the three trusts the previous one.
 
-| Dove | Quando | Cosa controlla |
+| Where | When | What it checks |
 | --- | --- | --- |
-| CI del repository | A ogni pull request | Schema e controlli semantici; il merge è bloccato se fallisce |
-| Backend | Alla sincronizzazione dal repository e a ogni richiesta dall'app | Di nuovo lo schema (un runbook non valido viene scartato e segnalato); parametri scelti dall'utente entro i limiti; permessi dell'utente sul cluster; cooldown |
-| Agente | Prima di eseguire | Policy locale del cluster: tipi di azione, namespace e limiti ammessi dal team che gestisce il cluster |
+| Repository CI | On every pull request | Schema and semantic checks; the merge is blocked if they fail |
+| Backend | When syncing from the repository and on every request from the app | The schema again (an invalid runbook is discarded and reported); user-chosen parameters within the limits; the user's permissions on the cluster; cooldown |
+| Agent | Before running | The cluster's local policy: action types, namespaces and limits allowed by the team that runs the cluster |
 
-Il backend usa lo stesso file `runbook.schema.json` della CI, così le regole non possono divergere. Lo schema ha un `$id` versionato (`runbook-v1.json`): una modifica incompatibile richiederà `apiVersion: .../v2`, e il backend accetterà entrambe le versioni durante la transizione.
+The backend uses the same `runbook.schema.json` file as the CI, so the rules cannot diverge. The schema has a versioned `$id` (`runbook-v1.json`): an incompatible change will require `apiVersion: .../v2`, and the backend will accept both versions during the transition.
 
-## Questioni aperte
+## Open questions
 
-- Servono selettori più espressivi di `matchLabels` (ad esempio `matchExpressions` con `In` e `NotIn`)? Per l'MVP bastano le uguaglianze.
-- Un runbook su più deployment (ad esempio tutti quelli con una certa etichetta) invece di uno solo: utile, ma aumenta il raggio d'azione.
-- Il repository dei runbook è uno per organizzazione o uno per team? Cambia come il backend gestisce nomi duplicati e permessi di modifica.
-- Alcuni messaggi dello schema sono ancora tecnici (ad esempio "should not be valid under"): lo script può tradurli in italiano leggibile prima di mostrarli.
+- Are selectors more expressive than `matchLabels` needed (for example `matchExpressions` with `In` and `NotIn`)? For the MVP equality is enough.
+- A runbook on several deployments (for example all those with a given label) instead of a single one: useful, but it widens the blast radius.
+- Is there one runbook repository per organization or one per team? It changes how the backend handles duplicate names and edit permissions.
+- Some schema messages are still technical (for example "should not be valid under"): the script could rewrite them into readable messages before showing them.

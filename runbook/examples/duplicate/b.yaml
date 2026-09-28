@@ -2,7 +2,7 @@ apiVersion: thumbops.mobiletechnologies.cloud/v1
 kind: Runbook
 metadata:
   name: payments-api-restart
-  description: Riavvia payments-api quando i pod vanno in crash
+  description: Restart payments-api when its pods crash
   owner: team-payments
 spec:
   alerts:
