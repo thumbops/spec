@@ -2,6 +2,8 @@
 
 Sep 25, 2026 · @Simone Bernardello
 
+This document explains the protocol in prose. The machine-readable contract is [`openapi.yaml`](openapi.yaml) (OpenAPI 3.1): the two must stay in sync, and `python3 protocol/validate.py` checks the contract, its examples and, with `--traffic`, recorded agent–backend exchanges.
+
 ## Principles
 
 The agent always opens the connections, over HTTPS to the backend: the cluster exposes nothing and no inbound ports need to be opened.
@@ -72,13 +74,17 @@ Request:
   "permissions": {
     "rollout-restart": true,
     "scale": true,
-    "cordon-drain": false
+    "cordon": false,
+    "uncordon": false,
+    "drain": false
   },
   "last_action_id": "3b2d..."
 }
 ```
 
-The `permissions` block is the result of a `SelfSubjectAccessReview` made by the agent: the app can thus disable in advance the actions that would fail for lack of RBAC.
+The `permissions` block has one entry per action type and is the result of a `SelfSubjectAccessReview` made by the agent: the app can thus disable in advance the actions that would fail for lack of RBAC.
+
+The backend never answers `426` to a heartbeat: an agent that is no longer supported keeps sending heartbeats (see "Errors and retries").
 
 Response:
 
@@ -137,7 +143,7 @@ In the runbook the drain fields are called `timeoutSeconds` and `deleteEmptyDirD
 
 Before running, the agent claims the action with `POST /v1/agent/actions/{id}/claim`; only a successful claim authorizes execution.
 
-The claim responds `200` if the action is still valid, `409` if it has already been claimed, `410` if it has expired or been canceled. When done, the agent sends `POST /v1/agent/actions/{id}/result`:
+The claim responds `200` (empty body) if the action is still valid, `404` if the action is unknown, `409` if it has already been claimed, `410` if it has expired or been canceled; in every case other than `200` the agent discards the action. When done, the agent sends `POST /v1/agent/actions/{id}/result`:
 
 ```json
 {
@@ -178,10 +184,12 @@ In the prototype the annotation with the ID and a second annotation with the res
 | --- | --- | --- |
 | `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed |
 | `409` / `410` | Action already claimed or expired | Discards it |
-| `426` | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
+| `426` (polling only) | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
 | `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s |
 
-Sending the `result` is retried until it succeeds, keeping the result in memory and in the resource annotation.
+Sending the `result` is retried until it succeeds, keeping the result in memory and in the resource annotation. The backend answers `200` with an empty body; `400`, `409` and `410` stop the retries.
+
+Error responses carry a short human-readable text body, which the agent logs but never parses. Receivers ignore unknown JSON fields, so adding an optional field is a compatible change.
 
 The TLS alerts equivalent to a `401` are the ones a server uses to reject the client certificate (RFC 8446, §6.2): `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_expired`, `certificate_unknown`, `unknown_ca`, `certificate_required`. Other network and TLS errors, including a server certificate the agent does not recognize, are temporary and are retried with backoff.
 
@@ -189,7 +197,7 @@ The TLS alerts equivalent to a `401` are the ones a server uses to reject the cl
 
 ## Cluster status
 
-Every 60 seconds the agent sends a compact status summary with `PUT /v1/agent/status`; the backend keeps the latest summary of each cluster for the dashboard.
+Every 60 seconds the agent sends a compact status summary with `PUT /v1/agent/status`; the backend answers `204` and keeps the latest summary of each cluster for the dashboard.
 
 The agent collects the data with client-go informers (watch), without querying the API server on every cycle. If metrics-server is in the cluster, it adds real CPU and memory usage; otherwise the `used` fields are `null`.
 

@@ -12,7 +12,8 @@ your phone. The full project context is in the private repository
 
 ```
 protocol/protocol.md        agent–backend protocol v1, in prose
-protocol/openapi.yaml       to be written: the same specification in OpenAPI 3.1
+protocol/openapi.yaml       the same protocol as a machine-readable contract (OpenAPI 3.1)
+protocol/validate.py        checks the contract, its examples and recorded traffic
 runbook/schema.md           runbook format and rules
 runbook/runbook.schema.json JSON Schema (draft 2020-12)
 runbook/validate.py         validation: schema + semantic checks
@@ -26,6 +27,10 @@ pip install -r runbook/requirements.txt   # needs jsonschema >= 4.18 (draft 2020
 python3 runbook/validate.py runbook/examples/valid       # must exit with 0
 python3 runbook/validate.py runbook/examples/invalid     # must exit with 1, one error per file
 python3 runbook/validate.py runbook/examples/duplicate   # must report the duplicate name
+
+pip install -r protocol/requirements.txt
+python3 protocol/validate.py                             # contract and examples, must exit with 0
+python3 protocol/validate.py --traffic exchanges.jsonl   # also recorded agent–backend traffic
 ```
 
 ## Rules
@@ -37,7 +42,11 @@ python3 runbook/validate.py runbook/examples/duplicate   # must report the dupli
 - **Consumers to update.** If you change a contract, list in the change what
   must be updated: the Go types in `../agent/internal/protocol/types.go`, the
   mock backend `../agent/internal/mockbackend`, the generated types in `../platform`.
-- `additionalProperties: false` everywhere in the schema: a runbook must not be
+- `protocol.md` and `openapi.yaml` describe the same protocol: change them
+  together. Protocol schemas do not forbid unknown fields (receivers ignore
+  them, so adding an optional field stays compatible); the `--traffic` check
+  still reports fields the contract does not declare.
+- `additionalProperties: false` everywhere in the runbook schema: a runbook must not be
   able to contain unexpected fields, for example arbitrary commands.
 - The action schema is chosen with `if`/`then` on `type`, not with `oneOf`,
   so errors point to the wrong field.
@@ -56,9 +65,14 @@ annotations and labels.
 
 ## Next steps
 
-1. Write `protocol/openapi.yaml` from `protocol/protocol.md`, with valid
-   examples; check that the current agent conforms.
-2. Automated tests (pytest) on the runbook examples.
+Done: `protocol/openapi.yaml`, checked against 87 exchanges recorded between
+the current agent and its mock backend (registration, renewal, heartbeat,
+polling with `200`/`204`/`426`, claims including a `409`, results including a
+`503` retry): all conform.
+
+1. Automated tests (pytest) on the runbook examples and on `protocol/validate.py`.
+2. CI (GitHub Actions) running both validators; in the agent's CI, record
+   traffic against the mock backend and check it with `--traffic`.
 3. Reusable GitHub Action to validate runbooks in customers' CI.
 4. Rewrite the technical `jsonschema` messages into readable ones.
 5. Add the `LICENSE` file (Apache 2.0).
