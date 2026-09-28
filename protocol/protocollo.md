@@ -56,6 +56,8 @@ Risposta:
 
 Il `cluster_uid` serve a riconoscere lo stesso cluster se l'agente viene reinstallato. Il certificato dura 30 giorni; quando ne resta meno di un terzo, l'agente invia una nuova CSR a `POST /v1/agent/certificate` autenticandosi con quello ancora valido. Revocare un cluster dal backend rende il certificato inutilizzabile alla chiamata successiva.
 
+Il rinnovo avviene solo mentre il certificato è ancora valido. Se l'agente non raggiunge il backend per tutto l'ultimo terzo della validità (agente fermo, rete o backend giù per più di 10 giorni), il certificato scade e non può più essere rinnovato: serve una nuova registrazione. Un certificato scaduto, revocato o firmato da una CA che il backend non riconosce viene rifiutato già durante l'handshake TLS dal reverse proxy, quindi l'agente non riceve un `401` ma un alert TLS: lo tratta come un `401` (vedi "Errori e ritentativi").
+
 ## Heartbeat
 
 Ogni 60 secondi l'agente chiama `PUT /v1/agent/heartbeat`; dopo 3 minuti senza heartbeat il backend segna il cluster come offline e lo mostra nell'app.
@@ -174,12 +176,14 @@ Nel prototipo l'annotazione con l'ID e una seconda annotazione con l'esito (`thu
 
 | Codice | Significato | Comportamento dell'agente |
 | --- | --- | --- |
-| `401` | Certificato non valido o cluster revocato | Si ferma e lo segnala nei log; serve una nuova registrazione |
+| `401`, o alert TLS di certificato rifiutato | Certificato non valido, scaduto o cluster revocato | Si ferma e lo segnala nei log con la causa; serve una nuova registrazione |
 | `409` / `410` | Azione già presa o scaduta | La scarta |
 | `426` | Versione dell'agente non più supportata | Continua solo con l'heartbeat e segnala l'aggiornamento |
 | `429` / `5xx` | Limite di richieste o errore del backend | Ritenta con backoff esponenziale e jitter, fino a 60 s |
 
 L'invio del `result` viene ritentato finché riesce, conservando l'esito in memoria e nell'annotazione della risorsa.
+
+Gli alert TLS che equivalgono a un `401` sono quelli con cui il server rifiuta il certificato client (RFC 8446, §6.2): `bad_certificate`, `unsupported_certificate`, `certificate_revoked`, `certificate_expired`, `certificate_unknown`, `unknown_ca`, `certificate_required`. Gli altri errori di rete e di TLS, compreso un certificato del server che l'agente non riconosce, sono temporanei e si ritentano con backoff.
 
 **Cambio di certificato.** Il certificato client si presenta solo all'handshake TLS, e con il long polling la connessione verso il backend non resta mai inattiva. Dopo la registrazione e dopo ogni rinnovo l'agente deve quindi aprire nuove connessioni, altrimenti continua a presentarsi senza certificato o con quello vecchio. Il prototipo lo fa, e un test lo verifica.
 
