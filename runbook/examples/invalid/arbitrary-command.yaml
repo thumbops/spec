@@ -1,0 +1,12 @@
+apiVersion: thumbops.mobiletechnologies.cloud/v1
+kind: Runbook
+metadata: { name: arbitrary-command }
+spec:
+  target:
+    clusters: { matchLabels: { env: prod } }
+    namespace: payments
+    deployment: payments-api
+  action:
+    type: rollout-restart
+    command: "kubectl delete namespace payments"
+  approval: single

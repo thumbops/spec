@@ -1,0 +1,9 @@
+apiVersion: thumbops.mobiletechnologies.cloud/v1
+kind: Runbook
+metadata: { name: scale-on-nodes }
+spec:
+  target:
+    clusters: { matchLabels: { env: prod } }
+    nodes: { matchLabels: { pool: batch } }
+  action: { type: scale, params: { min: 1, max: 5 } }
+  approval: single

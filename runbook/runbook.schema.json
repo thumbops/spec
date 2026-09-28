@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thumbops.mobiletechnologies.cloud/schemas/runbook-v1.json",
+  "title": "ThumbOps Runbook v1",
+  "description": "Un runbook autorizza una sola azione, su un insieme di cluster e risorse, con limiti e regole di approvazione fissati in anticipo.",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": { "const": "thumbops.mobiletechnologies.cloud/v1" },
+    "kind": { "const": "Runbook" },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/dnsLabel" },
+        "description": { "type": "string", "maxLength": 200 },
+        "owner": { "type": "string", "minLength": 1, "maxLength": 63 }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "required": ["target", "action", "approval"],
+      "additionalProperties": false,
+      "properties": {
+        "alerts": {
+          "description": "Alert a cui il runbook viene proposto. Senza alert, il runbook resta disponibile dalla dashboard.",
+          "type": "array",
+          "maxItems": 20,
+          "items": {
+            "type": "object",
+            "required": ["match"],
+            "additionalProperties": false,
+            "properties": {
+              "match": { "$ref": "#/$defs/stringMap" }
+            }
+          }
+        },
+        "target": {
+          "type": "object",
+          "required": ["clusters"],
+          "additionalProperties": false,
+          "properties": {
+            "clusters": { "$ref": "#/$defs/selector" },
+            "namespace": { "$ref": "#/$defs/dnsLabel" },
+            "deployment": { "$ref": "#/$defs/dnsSubdomain" },
+            "nodes": { "$ref": "#/$defs/selector" }
+          }
+        },
+        "action": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["rollout-restart", "scale", "cordon", "uncordon", "drain"] }
+          },
+          "allOf": [
+            { "if": { "properties": { "type": { "const": "rollout-restart" } } }, "then": { "$ref": "#/$defs/actionRolloutRestart" } },
+            { "if": { "properties": { "type": { "const": "scale" } } }, "then": { "$ref": "#/$defs/actionScale" } },
+            { "if": { "properties": { "type": { "const": "cordon" } } }, "then": { "$ref": "#/$defs/actionCordon" } },
+            { "if": { "properties": { "type": { "const": "uncordon" } } }, "then": { "$ref": "#/$defs/actionUncordon" } },
+            { "if": { "properties": { "type": { "const": "drain" } } }, "then": { "$ref": "#/$defs/actionDrain" } }
+          ]
+        },
+        "approval": { "enum": ["single", "two-person"] },
+        "cooldown": {
+          "description": "Tempo minimo tra due esecuzioni sulla stessa risorsa, ad esempio 10m. Minimo 1m (controllo semantico).",
+          "type": "string",
+          "pattern": "^[0-9]+(s|m|h)$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "action": { "properties": { "type": { "enum": ["rollout-restart", "scale"] } } } }
+          },
+          "then": {
+            "properties": {
+              "target": {
+                "required": ["namespace", "deployment"],
+                "not": { "required": ["nodes"] }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "action": { "properties": { "type": { "enum": ["cordon", "uncordon", "drain"] } } } }
+          },
+          "then": {
+            "properties": {
+              "target": {
+                "required": ["nodes"],
+                "not": { "anyOf": [{ "required": ["namespace"] }, { "required": ["deployment"] }] }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "dnsLabel": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+    },
+    "dnsSubdomain": {
+      "type": "string",
+      "maxLength": 253,
+      "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+    },
+    "labelValue": {
+      "type": "string",
+      "maxLength": 63,
+      "pattern": "^(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])?$"
+    },
+    "labelMap": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "maxLength": 317,
+        "pattern": "^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/labelValue" }
+    },
+    "stringMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
+    "selector": {
+      "type": "object",
+      "required": ["matchLabels"],
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": { "$ref": "#/$defs/labelMap" }
+      }
+    },
+    "actionRolloutRestart": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "rollout-restart" } }
+    },
+    "actionScale": {
+      "type": "object",
+      "required": ["type", "params"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "scale" },
+        "params": {
+          "description": "L'utente sceglie le repliche nell'app, solo entro min e max (min <= max: controllo semantico).",
+          "type": "object",
+          "required": ["min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "min": { "type": "integer", "minimum": 0, "maximum": 1000 },
+            "max": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        }
+      }
+    },
+    "actionCordon": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "cordon" } }
+    },
+    "actionUncordon": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": { "type": { "const": "uncordon" } }
+    },
+    "actionDrain": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "drain" },
+        "params": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeoutSeconds": { "type": "integer", "minimum": 30, "maximum": 3600, "default": 600 },
+            "deleteEmptyDirData": { "type": "boolean", "default": false }
+          }
+        }
+      }
+    }
+  }
+}

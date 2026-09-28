@@ -1,0 +1,18 @@
+apiVersion: thumbops.mobiletechnologies.cloud/v1
+kind: Runbook
+metadata:
+  name: payments-api-scale
+  description: Aumenta o riduce le repliche di payments-api entro limiti sicuri
+spec:
+  alerts:
+    - match: { alertname: HighRequestLatency, service: payments-api }
+  target:
+    clusters:
+      matchLabels: { env: prod, region: eu-west-1 }
+    namespace: payments
+    deployment: payments-api
+  action:
+    type: scale
+    params: { min: 2, max: 10 }
+  approval: single
+  cooldown: 5m
