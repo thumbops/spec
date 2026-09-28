@@ -6,7 +6,7 @@ and backend follow them, customers use the validator in their CI.
 
 ThumbOps lets you run only pre-approved actions on Kubernetes clusters from
 your phone. The full project context is in the private repository
-`../platform` (`CLAUDE.md` and `docs/progetto.md`), if present on disk.
+`../platform` (`CLAUDE.md` and `docs/project.md`), if present on disk.
 
 ## Layout
 
