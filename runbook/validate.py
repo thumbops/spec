@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Valida i runbook ThumbOps: JSON Schema piu' controlli semantici.
+"""Validate ThumbOps runbooks: JSON Schema plus semantic checks.
 
-Uso:
-    python3 validate.py runbooks/            # tutti i .yaml/.yml nella cartella
-    python3 validate.py a.yaml b.yaml        # file singoli
+Usage:
+    python3 validate.py runbooks/            # every .yaml/.yml in the directory
+    python3 validate.py a.yaml b.yaml        # single files
 
-Esce con codice 1 se almeno un runbook non e' valido (utile in CI).
-Dipendenze: pip install -r requirements.txt (jsonschema >= 4.18, pyyaml)
+Exits with code 1 if at least one runbook is invalid (useful in CI).
+Dependencies: pip install -r requirements.txt (jsonschema >= 4.18, pyyaml)
 """
 import json
 import re
@@ -18,7 +18,7 @@ import yaml
 try:
     from jsonschema import Draft202012Validator
 except ImportError:
-    sys.exit("serve jsonschema >= 4.18: pip install -r requirements.txt")
+    sys.exit("jsonschema >= 4.18 is required: pip install -r requirements.txt")
 
 SCHEMA_PATH = Path(__file__).with_name("runbook.schema.json")
 MIN_COOLDOWN_SECONDS = 60
@@ -31,7 +31,7 @@ def duration_seconds(value):
 
 
 def semantic_errors(doc):
-    """Regole che JSON Schema non esprime bene."""
+    """Rules that JSON Schema does not express well."""
     errors = []
     spec = doc.get("spec", {})
     action = spec.get("action", {})
@@ -39,11 +39,11 @@ def semantic_errors(doc):
     if action.get("type") == "scale":
         params = action.get("params", {})
         if params.get("min", 0) > params.get("max", 0):
-            errors.append("spec.action.params: min non puo' essere maggiore di max")
+            errors.append("spec.action.params: min cannot be greater than max")
 
     cooldown = spec.get("cooldown")
     if cooldown and duration_seconds(cooldown) < MIN_COOLDOWN_SECONDS:
-        errors.append(f"spec.cooldown: minimo {MIN_COOLDOWN_SECONDS // 60}m, trovato {cooldown}")
+        errors.append(f"spec.cooldown: minimum {MIN_COOLDOWN_SECONDS // 60}m, found {cooldown}")
 
     return errors
 
@@ -72,31 +72,31 @@ def main(args):
         try:
             doc = yaml.safe_load(path.read_text())
         except yaml.YAMLError as exc:
-            print(f"ERRORE {path}: YAML non valido: {exc}")
+            print(f"ERROR  {path}: invalid YAML: {exc}")
             failed += 1
             continue
 
         errors = []
         for err in sorted(validator.iter_errors(doc), key=lambda e: list(e.absolute_path)):
-            location = ".".join(str(p) for p in err.absolute_path) or "(radice)"
+            location = ".".join(str(p) for p in err.absolute_path) or "(root)"
             errors.append(f"{location}: {err.message}")
         if not errors:
             errors.extend(semantic_errors(doc))
             name = doc["metadata"]["name"]
             if name in names:
-                errors.append(f"metadata.name '{name}' gia' usato in {names[name]}")
+                errors.append(f"metadata.name '{name}' already used in {names[name]}")
             else:
                 names[name] = path
 
         if errors:
             failed += 1
-            print(f"ERRORE {path}")
+            print(f"ERROR  {path}")
             for line in errors:
                 print(f"  - {line}")
         else:
             print(f"OK     {path}")
 
-    print(f"\n{failed} runbook non validi" if failed else "\nTutti i runbook sono validi")
+    print(f"\n{failed} invalid runbook(s)" if failed else "\nAll runbooks are valid")
     return 1 if failed else 0
 
 

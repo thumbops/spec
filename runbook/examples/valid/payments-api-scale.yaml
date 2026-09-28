@@ -2,7 +2,7 @@ apiVersion: thumbops.mobiletechnologies.cloud/v1
 kind: Runbook
 metadata:
   name: payments-api-scale
-  description: Aumenta o riduce le repliche di payments-api entro limiti sicuri
+  description: Scale payments-api up or down within safe limits
 spec:
   alerts:
     - match: { alertname: HighRequestLatency, service: payments-api }

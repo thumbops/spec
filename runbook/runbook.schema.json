@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thumbops.mobiletechnologies.cloud/schemas/runbook-v1.json",
   "title": "ThumbOps Runbook v1",
-  "description": "Un runbook autorizza una sola azione, su un insieme di cluster e risorse, con limiti e regole di approvazione fissati in anticipo.",
+  "description": "A runbook authorizes a single action, on a set of clusters and resources, with limits and approval rules fixed in advance.",
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "additionalProperties": false,
@@ -25,7 +25,7 @@
       "additionalProperties": false,
       "properties": {
         "alerts": {
-          "description": "Alert a cui il runbook viene proposto. Senza alert, il runbook resta disponibile dalla dashboard.",
+          "description": "Alerts the runbook is offered for. Without alerts, the runbook stays available from the dashboard.",
           "type": "array",
           "maxItems": 20,
           "items": {
@@ -64,7 +64,7 @@
         },
         "approval": { "enum": ["single", "two-person"] },
         "cooldown": {
-          "description": "Tempo minimo tra due esecuzioni sulla stessa risorsa, ad esempio 10m. Minimo 1m (controllo semantico).",
+          "description": "Minimum time between two runs on the same resource, for example 10m. Minimum 1m (semantic check).",
           "type": "string",
           "pattern": "^[0-9]+(s|m|h)$"
         }
@@ -150,7 +150,7 @@
       "properties": {
         "type": { "const": "scale" },
         "params": {
-          "description": "L'utente sceglie le repliche nell'app, solo entro min e max (min <= max: controllo semantico).",
+          "description": "The user picks the replicas in the app, only between min and max (min <= max: semantic check).",
           "type": "object",
           "required": ["min", "max"],
           "additionalProperties": false,
