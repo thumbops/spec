@@ -1,0 +1,643 @@
+openapi: 3.1.0
+info:
+  title: ThumbOps agent–backend protocol
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    Protocol v1 between the ThumbOps agent, which runs in every Kubernetes
+    cluster, and the backend. `protocol.md` in the same directory explains the
+    behavior in prose; this file is the machine-readable contract and the two
+    must stay in sync.
+
+    - The agent always opens the connections: the cluster exposes nothing.
+    - After registration every call is authenticated with mTLS. The
+      certificate CN is the `cluster_id`, so paths do not repeat it.
+    - JSON bodies, timestamps in RFC 3339 UTC.
+    - Receivers must ignore unknown fields: adding an optional field is a
+      compatible change, anything else requires `/v2`.
+    - Error responses carry a short human-readable text body; the agent
+      logs it but never parses it.
+servers:
+  - url: https://agent.thumbops.mobiletechnologies.cloud
+security:
+  - agentCertificate: []
+tags:
+  - name: identity
+    description: Registration and certificate renewal
+  - name: health
+    description: Heartbeat and cluster status
+  - name: actions
+    description: Receiving, claiming and reporting actions
+
+paths:
+  /v1/register:
+    post:
+      tags: [identity]
+      operationId: register
+      summary: Register the agent with a single-use bootstrap token
+      description: |
+        The agent generates its own Ed25519 key, which never leaves the
+        cluster, and sends a CSR. The backend invalidates the token and
+        returns a certificate whose CN is the `cluster_id`.
+      security:
+        - bootstrapToken: []
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RegisterRequest' }
+            example:
+              csr: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----\n"
+              agent_version: 0.1.0
+              kubernetes_version: v1.34.3
+              cluster_uid: 5f0c2a3e-9d1b-4c7a-8e2f-6b4d3c2a1f00
+      responses:
+        '200':
+          description: Registered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RegisterResponse' }
+              example:
+                cluster_id: 8c1f0e7a-0000-4000-8000-00000000c1a5
+                certificate: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+                ca_chain: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+                expires_at: '2026-10-25T10:00:00Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401':
+          description: Bootstrap token invalid, expired or already used. The agent stops.
+          content:
+            text/plain:
+              schema: { type: string }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/certificate:
+    post:
+      tags: [identity]
+      operationId: renewCertificate
+      summary: Renew the agent certificate
+      description: |
+        Sent when less than a third of the certificate validity is left,
+        authenticating with the still valid certificate. After a renewal the
+        agent must open new connections, because the client certificate is
+        presented only at the TLS handshake.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CertificateRequest' }
+            example:
+              csr: "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----\n"
+      responses:
+        '200':
+          description: New certificate
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CertificateResponse' }
+              example:
+                certificate: "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n"
+                expires_at: '2026-11-15T10:00:00Z'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/heartbeat:
+    put:
+      tags: [health]
+      operationId: heartbeat
+      summary: Report agent health and read the polling configuration
+      description: |
+        Every 60 seconds. After 3 minutes without a heartbeat the backend
+        marks the cluster as offline. The backend never answers `426` here:
+        an unsupported agent keeps sending heartbeats.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HeartbeatRequest' }
+            example:
+              agent_version: 0.1.0
+              kubernetes_version: v1.34.3
+              nodes: { ready: 6, total: 6 }
+              permissions:
+                rollout-restart: true
+                scale: true
+                cordon: false
+                uncordon: false
+                drain: false
+              last_action_id: 3b2d6c1e-7f4a-4e8b-9c0d-1a2b3c4d5e6f
+      responses:
+        '200':
+          description: Heartbeat recorded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HeartbeatResponse' }
+              example:
+                server_time: '2026-09-25T10:00:00Z'
+                poll: { interval_seconds: 0, wait_seconds: 20 }
+                min_agent_version: 0.1.0
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/status:
+    put:
+      tags: [health]
+      operationId: putClusterStatus
+      summary: Send a compact cluster status summary for the dashboard
+      description: |
+        Every 60 seconds, and right away when a poll response has
+        `status_requested: true`. The backend keeps only the latest summary
+        of each cluster. Namespaces listed in the local policy's
+        `status.exclude_namespaces` are never included.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClusterStatus' }
+            example:
+              collected_at: '2026-09-28T10:00:00Z'
+              resources:
+                cpu: { allocatable_m: 23520, requested_m: 15800, used_m: null }
+                memory: { allocatable_mib: 92160, requested_mib: 61440, used_mib: null }
+              nodes:
+                total: 6
+                ready: 5
+                cordoned: 1
+                items:
+                  - name: ip-10-0-1-12
+                    ready: false
+                    unschedulable: false
+                    conditions: [MemoryPressure]
+                    cpu: { allocatable_m: 3920, requested_m: 3100 }
+                    memory: { allocatable_mib: 15360, requested_mib: 12288 }
+              workloads:
+                unhealthy_pods:
+                  - { namespace: payments, name: payments-api-7d9f-x2k, reason: CrashLoopBackOff, restarts: 14 }
+                degraded_deployments:
+                  - { namespace: payments, name: payments-api, ready: 1, desired: 3 }
+              truncated: false
+      responses:
+        '204':
+          description: Status stored
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/actions:
+    get:
+      tags: [actions]
+      operationId: pollActions
+      summary: Wait for approved actions (long polling)
+      description: |
+        The request stays open for up to `wait` seconds. The agent reopens it
+        as soon as it gets a response. Proxy and service timeouts must be
+        longer than the wait (for example 30 s).
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+        - name: wait
+          in: query
+          required: true
+          description: Seconds to wait for an action before answering `204`; `wait_seconds` from the heartbeat.
+          schema: { type: integer, minimum: 0 }
+          example: 20
+      responses:
+        '200':
+          description: One or more actions, or a status request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActionsResponse' }
+              example:
+                actions:
+                  - action_id: 3b2d6c1e-7f4a-4e8b-9c0d-1a2b3c4d5e6f
+                    type: scale
+                    params: { namespace: payments, deployment: payments-api, replicas: 6 }
+                    runbook: payments/scale-api@4f2a91c
+                    requested_by: u_123
+                    approved_by: [u_456]
+                    expires_at: '2026-09-25T10:02:00Z'
+        '204':
+          description: Nothing arrived before the wait ended
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '426':
+          description: Agent version no longer supported. The agent stops polling and keeps only the heartbeat.
+          content:
+            text/plain:
+              schema: { type: string }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/actions/{action_id}/claim:
+    post:
+      tags: [actions]
+      operationId: claimAction
+      summary: Take ownership of an action before running it
+      description: Only a `200` authorizes execution. Expired actions are not even claimed.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+        - $ref: '#/components/parameters/ActionID'
+      responses:
+        '200':
+          description: Claimed; the agent may run the action. Empty body.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Unknown action. The agent discards it.
+          content:
+            text/plain:
+              schema: { type: string }
+        '409':
+          description: Already claimed. The agent discards it.
+          content:
+            text/plain:
+              schema: { type: string }
+        '410':
+          description: Expired or canceled. The agent discards it.
+          content:
+            text/plain:
+              schema: { type: string }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+  /v1/agent/actions/{action_id}/result:
+    post:
+      tags: [actions]
+      operationId: sendResult
+      summary: Report the result of a claimed action
+      description: |
+        Retried with backoff until the backend confirms, except on `400`,
+        `409` and `410`. The same result is also stored in the modified
+        resource's `thumbops.mobiletechnologies.cloud/last-action-result`
+        annotation, so it can be resent after a restart.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+        - $ref: '#/components/parameters/ActionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Result' }
+            example:
+              status: succeeded
+              started_at: '2026-09-25T10:00:12Z'
+              finished_at: '2026-09-25T10:00:14Z'
+              message: payments/payments-api scaled from 3 to 6 replicas
+              details: { previous_replicas: 3, replicas: 6 }
+      responses:
+        '200':
+          description: Result recorded. Empty body.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409':
+          description: The action is not claimed by this agent. The agent stops retrying.
+          content:
+            text/plain:
+              schema: { type: string }
+        '410':
+          description: The action is no longer accepting results. The agent stops retrying.
+          content:
+            text/plain:
+              schema: { type: string }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
+components:
+  securitySchemes:
+    bootstrapToken:
+      type: http
+      scheme: bearer
+      description: Single-use bootstrap token, valid for 1 hour, used only by `POST /v1/register`.
+    agentCertificate:
+      type: mutualTLS
+      description: |
+        Client certificate issued at registration; its CN is the `cluster_id`.
+        The reverse proxy verifies it and passes the CN to the service in an
+        internal header. A certificate that is expired, revoked or signed by
+        an unknown CA is rejected during the TLS handshake, before any HTTP
+        response: the agent treats that TLS alert as a `401`.
+
+  parameters:
+    UserAgent:
+      name: User-Agent
+      in: header
+      required: true
+      description: Agent name and version, used by the backend to enforce `min_agent_version`.
+      schema: { type: string, pattern: '^thumbops-agent/\S+$' }
+      example: thumbops-agent/0.1.0
+    ActionID:
+      name: action_id
+      in: path
+      required: true
+      schema: { $ref: '#/components/schemas/ActionID' }
+
+  responses:
+    BadRequest:
+      description: Malformed request body. Not retried.
+      content:
+        text/plain:
+          schema: { type: string }
+    Unauthorized:
+      description: |
+        Certificate invalid or cluster revoked. The agent stops and logs the
+        cause: a new registration is needed. A TLS alert rejecting the client
+        certificate during the handshake has the same meaning.
+      content:
+        text/plain:
+          schema: { type: string }
+    TooManyRequests:
+      description: Rate limited. Retried with exponential backoff and jitter, up to 60 s.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying, if the backend knows it.
+          schema: { type: integer, minimum: 0 }
+      content:
+        text/plain:
+          schema: { type: string }
+    ServerError:
+      description: Backend error. Retried with exponential backoff and jitter, up to 60 s.
+      content:
+        text/plain:
+          schema: { type: string }
+
+  schemas:
+    ActionID:
+      type: string
+      minLength: 1
+      description: Unique action identifier, a UUID in the real backend.
+      examples: [3b2d6c1e-7f4a-4e8b-9c0d-1a2b3c4d5e6f]
+    ActionType:
+      type: string
+      enum: [rollout-restart, scale, cordon, uncordon, drain]
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339, UTC.
+    PEM:
+      type: string
+      minLength: 1
+
+    RegisterRequest:
+      type: object
+      required: [csr, agent_version, kubernetes_version, cluster_uid]
+      properties:
+        csr:
+          $ref: '#/components/schemas/PEM'
+          description: PKCS#10 request for the agent's Ed25519 key. The backend ignores its subject.
+        agent_version: { type: string, minLength: 1 }
+        kubernetes_version: { type: string, minLength: 1 }
+        cluster_uid:
+          type: string
+          minLength: 1
+          description: UID of the kube-system namespace, to recognize the same cluster if the agent is reinstalled.
+    RegisterResponse:
+      type: object
+      required: [cluster_id, certificate, ca_chain, expires_at]
+      properties:
+        cluster_id: { type: string, format: uuid }
+        certificate: { $ref: '#/components/schemas/PEM' }
+        ca_chain: { $ref: '#/components/schemas/PEM' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+    CertificateRequest:
+      type: object
+      required: [csr]
+      properties:
+        csr: { $ref: '#/components/schemas/PEM' }
+    CertificateResponse:
+      type: object
+      required: [certificate, expires_at]
+      properties:
+        certificate: { $ref: '#/components/schemas/PEM' }
+        expires_at: { $ref: '#/components/schemas/Timestamp' }
+
+    HeartbeatRequest:
+      type: object
+      required: [agent_version, kubernetes_version, nodes, permissions]
+      properties:
+        agent_version: { type: string, minLength: 1 }
+        kubernetes_version:
+          type: string
+          description: Empty if the agent could not read it.
+        nodes:
+          type: object
+          required: [ready, total]
+          properties:
+            ready: { type: integer, minimum: 0 }
+            total: { type: integer, minimum: 0 }
+        permissions:
+          type: object
+          description: |
+            For each action type, whether the agent's RBAC allows it, from a
+            SelfSubjectAccessReview. The app disables in advance the actions
+            that would fail.
+          propertyNames: { $ref: '#/components/schemas/ActionType' }
+          additionalProperties: { type: boolean }
+        last_action_id: { $ref: '#/components/schemas/ActionID' }
+    HeartbeatResponse:
+      type: object
+      required: [server_time, poll, min_agent_version]
+      properties:
+        server_time:
+          $ref: '#/components/schemas/Timestamp'
+          description: The agent uses it to correct clock skew when it checks action deadlines.
+        poll: { $ref: '#/components/schemas/PollConfig' }
+        min_agent_version: { type: string, minLength: 1 }
+    PollConfig:
+      type: object
+      description: Lets the backend tune polling without upgrading the agent.
+      required: [interval_seconds, wait_seconds]
+      properties:
+        interval_seconds:
+          type: integer
+          minimum: 0
+          description: Pause between polls when nothing arrived; 0 = reopen immediately.
+        wait_seconds:
+          type: integer
+          minimum: 0
+          description: Long polling wait; 0 = plain polling.
+
+    ActionsResponse:
+      type: object
+      required: [actions]
+      properties:
+        actions:
+          type: array
+          description: At most one action in the MVP.
+          items: { $ref: '#/components/schemas/Action' }
+        status_requested:
+          type: boolean
+          description: The user asked for a fresh cluster status; the agent sends `PUT /v1/agent/status` right away.
+    Action:
+      type: object
+      required: [action_id, type, params, expires_at]
+      properties:
+        action_id: { $ref: '#/components/schemas/ActionID' }
+        type: { $ref: '#/components/schemas/ActionType' }
+        params: { $ref: '#/components/schemas/Params' }
+        runbook:
+          type: string
+          description: Runbook file and Git commit the action comes from, for auditing.
+          examples: [payments/scale-api@4f2a91c]
+        requested_by: { type: string }
+        approved_by:
+          type: array
+          items: { type: string }
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+          description: 2 minutes after approval. Checked with the backend clock; expired actions are not claimed.
+      allOf:
+        - if: { properties: { type: { enum: [rollout-restart] } } }
+          then: { properties: { params: { required: [namespace, deployment] } } }
+        - if: { properties: { type: { enum: [scale] } } }
+          then: { properties: { params: { required: [namespace, deployment, replicas] } } }
+        - if: { properties: { type: { enum: [cordon, uncordon, drain] } } }
+          then: { properties: { params: { required: [node] } } }
+    Params:
+      type: object
+      description: |
+        Already resolved by the backend from the runbook and the user's
+        choices. Which fields are required depends on the action type.
+      properties:
+        namespace: { type: string, minLength: 1 }
+        deployment: { type: string, minLength: 1 }
+        node: { type: string, minLength: 1 }
+        replicas:
+          type: integer
+          minimum: 0
+          maximum: 1000
+          description: Already checked to be between the runbook's `min` and `max`.
+        timeout_seconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+          default: 600
+          description: Drain only.
+        delete_emptydir_data:
+          type: boolean
+          default: false
+          description: Drain only. The agent's local policy must also allow it.
+
+    Result:
+      type: object
+      required: [status, started_at, finished_at, message]
+      properties:
+        status:
+          type: string
+          enum: [succeeded, failed, rejected]
+          description: |
+            `failed`: Kubernetes API error or unsafe drain. `rejected`: refused
+            by the agent's local policy or unknown action type.
+        started_at: { $ref: '#/components/schemas/Timestamp' }
+        finished_at: { $ref: '#/components/schemas/Timestamp' }
+        message:
+          type: string
+          description: Human-readable outcome, shown in the app.
+        details:
+          type: object
+          description: Action-specific data, for example `previous_replicas`, `evicted_pods`, `remaining_pods`, `replayed`.
+
+    ClusterStatus:
+      type: object
+      required: [collected_at, resources, nodes, workloads, truncated]
+      properties:
+        collected_at: { $ref: '#/components/schemas/Timestamp' }
+        resources:
+          type: object
+          required: [cpu, memory]
+          properties:
+            cpu:
+              type: object
+              required: [allocatable_m, requested_m, used_m]
+              properties:
+                allocatable_m: { type: integer, minimum: 0 }
+                requested_m: { type: integer, minimum: 0 }
+                used_m:
+                  type: [integer, 'null']
+                  minimum: 0
+                  description: '`null` without metrics-server.'
+            memory:
+              type: object
+              required: [allocatable_mib, requested_mib, used_mib]
+              properties:
+                allocatable_mib: { type: integer, minimum: 0 }
+                requested_mib: { type: integer, minimum: 0 }
+                used_mib:
+                  type: [integer, 'null']
+                  minimum: 0
+                  description: '`null` without metrics-server.'
+        nodes:
+          type: object
+          required: [total, ready, cordoned, items]
+          properties:
+            total: { type: integer, minimum: 0 }
+            ready: { type: integer, minimum: 0 }
+            cordoned: { type: integer, minimum: 0 }
+            items:
+              type: array
+              description: Every node up to 100 nodes; beyond that, only the nodes with problems.
+              items: { $ref: '#/components/schemas/NodeStatus' }
+        workloads:
+          type: object
+          required: [unhealthy_pods, degraded_deployments]
+          properties:
+            unhealthy_pods:
+              type: array
+              maxItems: 20
+              description: Sorted by severity.
+              items:
+                type: object
+                required: [namespace, name, reason, restarts]
+                properties:
+                  namespace: { type: string }
+                  name: { type: string }
+                  reason: { type: string, examples: [CrashLoopBackOff, Pending] }
+                  restarts: { type: integer, minimum: 0 }
+            degraded_deployments:
+              type: array
+              maxItems: 20
+              description: Sorted by severity.
+              items:
+                type: object
+                required: [namespace, name, ready, desired]
+                properties:
+                  namespace: { type: string }
+                  name: { type: string }
+                  ready: { type: integer, minimum: 0 }
+                  desired: { type: integer, minimum: 0 }
+        truncated:
+          type: boolean
+          description: Something was cut by the size limits; the app shows it.
+    NodeStatus:
+      type: object
+      required: [name, ready, unschedulable, conditions, cpu, memory]
+      properties:
+        name: { type: string }
+        ready: { type: boolean }
+        unschedulable: { type: boolean }
+        conditions:
+          type: array
+          description: Active problem conditions.
+          items: { type: string, examples: [MemoryPressure, DiskPressure, PIDPressure] }
+        cpu:
+          type: object
+          required: [allocatable_m, requested_m]
+          properties:
+            allocatable_m: { type: integer, minimum: 0 }
+            requested_m: { type: integer, minimum: 0 }
+        memory:
+          type: object
+          required: [allocatable_mib, requested_mib]
+          properties:
+            allocatable_mib: { type: integer, minimum: 0 }
+            requested_mib: { type: integer, minimum: 0 }

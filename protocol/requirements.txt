@@ -1,0 +1,4 @@
+jsonschema>=4.18
+openapi-spec-validator>=0.7
+pyyaml
+rfc3339-validator
