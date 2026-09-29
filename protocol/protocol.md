@@ -31,7 +31,7 @@ The agent generates its own private key, which never leaves the cluster: the bac
 
 1. A cluster is created in the backend from the app or the CLI, which returns a single-use bootstrap token valid for 1 hour.
 2. The token is put in a Secret and the agent is installed (Helm chart).
-3. At startup the agent generates an Ed25519 key, saves it in a Secret and calls `POST /v1/register`.
+3. At startup the agent generates an Ed25519 key and calls `POST /v1/register`; once registered it saves key and certificate together in a Secret.
 4. The backend invalidates the token and returns the signed certificate.
 
 Request (`Authorization: Bearer <bootstrap token>`):
@@ -57,6 +57,8 @@ Response:
 ```
 
 The `cluster_uid` lets the backend recognize the same cluster if the agent is reinstalled. The certificate lasts 30 days; when less than a third is left, the agent sends a new CSR to `POST /v1/agent/certificate`, authenticating with the still valid one. Revoking a cluster in the backend makes the certificate unusable on the next call.
+
+**New registration.** The agent keeps, next to key and certificate, the SHA-256 of the bootstrap token it registered with (never the token itself). At startup it registers again, with a new key, when the mounted token differs from that one: after a `401` (cluster revoked, certificate expired) the fix is a new token from the app and a restart of the agent. The previous identity is replaced only after the new registration succeeds, and the same token never triggers a second registration. The backend recognizes the cluster from the `cluster_uid`.
 
 Renewal happens only while the certificate is still valid. If the agent cannot reach the backend for the whole last third of the validity (agent stopped, network or backend down for more than 10 days), the certificate expires and can no longer be renewed: a new registration is needed. A certificate that is expired, revoked or signed by a CA the backend does not know is rejected by the reverse proxy already during the TLS handshake, so the agent receives a TLS alert rather than a `401`: it treats it as a `401` (see "Errors and retries").
 
@@ -182,7 +184,7 @@ In the prototype the annotation with the ID and a second annotation with the res
 
 | Code | Meaning | Agent behavior |
 | --- | --- | --- |
-| `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed |
+| `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed (new bootstrap token, see "New registration") |
 | `409` / `410` | Action already claimed or expired | Discards it |
 | `426` (polling only) | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
 | `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s |
