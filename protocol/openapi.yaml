@@ -351,12 +351,12 @@ paths:
             text/plain:
               schema: { type: string }
         '409':
-          description: The action is not claimed by this agent. The agent stops the action and sends no result.
+          description: The backend no longer tracks the action (not claimed by this agent, expired or cancelled). The agent stops it, leaves the node cordoned, removes the `drain-in-progress` annotation and sends no result.
           content:
             text/plain:
               schema: { type: string }
         '410':
-          description: The action expired or was cancelled. The agent stops the action, leaves the node cordoned and sends no result.
+          description: The backend no longer tracks the action (expired or cancelled). The agent stops it, leaves the node cordoned, removes the `drain-in-progress` annotation and sends no result.
           content:
             text/plain:
               schema: { type: string }

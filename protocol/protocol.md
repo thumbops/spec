@@ -186,7 +186,7 @@ The backend answers `200` (empty body), stores the progress for the dashboard an
 | `claimed` | Agent (claim) | Running |
 | `succeeded` / `failed` / `rejected` | Agent (result) | Finished |
 | `expired` | Backend | Not claimed before the deadline, or claimed and then 5 minutes without a result or a progress (each progress renews the lease) |
-| `cancelled` | Backend | Canceled by the user before the claim |
+| `cancelled` | Backend | Canceled by the user before the claim, or while it runs (the next progress gets `410`) |
 
 Every state change produces an audit log entry and a notification to the user who requested the action.
 
@@ -205,7 +205,7 @@ In the prototype the annotation with the ID and a second annotation with the res
 | Code | Meaning | Agent behavior |
 | --- | --- | --- |
 | `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed (new bootstrap token, see "New registration") |
-| `409` / `410` | Action already claimed or expired | Discards it |
+| `409` / `410` | Action already claimed or expired | Discards it; for a progress, stops the action (see Progress) |
 | `426` (polling only) | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
 | `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s |
 
