@@ -173,11 +173,11 @@ The claim responds `200` (empty body) if the action is still valid, `404` if the
 }
 ```
 
-`details` depends on the action type; for `drain`, `blocked` lists at most 20 pods the agent cannot evict yet. The agent sends the first progress right after the cordon, then whenever the counts change (at most once every 5 seconds) and at least every 30 seconds. Progress is never retried: the next one is newer.
+`details` depends on the action type; for `drain`, `blocked` lists at most 20 pods the agent cannot evict yet. The agent sends the first progress right after the cordon, then whenever the counts change (at most once every 5 seconds) and at least every 30 seconds. Progress is never retried: the next one is newer. The only exception is the first progress of a resumed drain (see **Resume**).
 
-The backend answers `200` (empty body), stores the progress for the dashboard and renews the action's lease (see the states below). `409` or `410` mean the backend no longer tracks the action (expired or cancelled): the agent stops it, with no further evictions, leaves the node cordoned and sends no result. `404` means the backend does not support progress: the agent stops sending it for that action and goes on.
+The backend answers `200` (empty body), stores the progress for the dashboard and renews the action's lease (see the states below). `409` or `410` mean the backend no longer tracks the action (expired or cancelled): the agent stops it, with no further evictions, leaves the node cordoned and sends no result. `404` means the backend does not support progress: the agent stops sending it for that action and goes on (except for a resumed drain, see **Resume**).
 
-**Resume.** When the drain starts, the agent writes the annotation `thumbops.mobiletechnologies.cloud/drain-in-progress` on the node, in the same patch as the cordon, with the `action_id`, the start time and the parameters. If the agent restarts, it finds the annotation and resumes the drain with the time left, without a new claim: it sends progress and the result for the same `action_id`, which the backend accepts while the action is `claimed`. The annotation is removed in the patch that writes the result, or when the backend answers `409`/`410` to the progress.
+**Resume.** When the drain starts, the agent writes the annotation `thumbops.mobiletechnologies.cloud/drain-in-progress` on the node, in the same patch as the cordon, with the `action_id`, the start time and the parameters. If the agent restarts, it finds the annotation and resumes the drain with the time left, without a new claim: it sends progress and the result for the same `action_id`, which the backend accepts while the action is `claimed`. A resumed drain is first checked against the current local policy: if the policy rejects it, the agent sends a `rejected` result and removes the annotation, leaving the node as it is. Then the resumed drain changes nothing until its first progress is accepted (`200`): the agent sends it before re-asserting the cordon, and tries it up to three times on a network error or a `5xx`. `404`, `409` or `410` to it, or repeated failures, make the agent abandon the drain: it removes the annotation, leaves the node as it is and sends no result. The annotation is removed in the patch that writes the result, when the backend answers `409`/`410` to a progress, and when the user uncordons the node through an `uncordon` action. On `401` (or a rejected certificate) the agent stops, keeps the annotation and sends no result: the drain is resumed after a new registration.
 
 | State | Set by | Meaning |
 | --- | --- | --- |
@@ -207,7 +207,7 @@ In the prototype the annotation with the ID and a second annotation with the res
 | `401`, or a TLS alert rejecting the certificate | Certificate invalid or expired, or cluster revoked | Stops and logs it with the cause; a new registration is needed (new bootstrap token, see "New registration") |
 | `409` / `410` | Action already claimed or expired | Discards it; for a progress, stops the action (see Progress) |
 | `426` (polling only) | Agent version no longer supported | Continues with the heartbeat only and reports that an upgrade is needed |
-| `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s |
+| `429` / `5xx` | Rate limit or backend error | Retries with exponential backoff and jitter, up to 60 s (except progress, which is never retried) |
 
 Sending the `result` is retried until it succeeds, keeping the result in memory and in the resource annotation. The backend answers `200` with an empty body; `400`, `409` and `410` stop the retries.
 

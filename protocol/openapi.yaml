@@ -321,9 +321,13 @@ paths:
       description: |
         Sent for long actions only (today `drain`): right after the cordon,
         then when the counts change (at most once every 5 s) and at least
-        every 30 s. Never retried. Each accepted progress renews the lease of
-        the claimed action (5 minutes). Also sent after an agent restart for
-        a drain it resumes, without a new claim.
+        every 30 s. Never retried, except the first progress of a resumed
+        drain. Each accepted progress renews the lease of the claimed action
+        (5 minutes). Also sent after an agent restart for a drain it resumes,
+        without a new claim: the resumed drain changes nothing until its first
+        progress gets `200` (tried up to three times on a network error or
+        `5xx`), and `404`, `409` or `410` make the agent abandon it with no
+        result.
       parameters:
         - $ref: '#/components/parameters/UserAgent'
         - $ref: '#/components/parameters/ActionID'
