@@ -137,7 +137,7 @@ Parameters per action type, already resolved by the backend from the runbook and
 | `rollout-restart` | `namespace`, `deployment` |
 | `scale` | `namespace`, `deployment`, `replicas` (already checked to be between the runbook's `min` and `max`) |
 | `cordon`, `uncordon` | `node` |
-| `drain` | `node`, `timeout_seconds` (default 600), `delete_emptydir_data` (default false) |
+| `drain` | `node`, `timeout_seconds` (default 600), `delete_emptydir_data` (default false). The agent never evicts its own pod: it is skipped like DaemonSet pods and reported in the result (`details.agent_pod_left`); the node is cordoned, so the agent moves at its next restart. |
 
 In the runbook the drain fields are called `timeoutSeconds` and `deleteEmptyDirData`, as in Kubernetes resources; in the protocol they follow the snake\_case convention of the other messages.
 
@@ -159,13 +159,33 @@ The claim responds `200` (empty body) if the action is still valid, `404` if the
 
 `status` is `succeeded`, `failed` (Kubernetes API error) or `rejected` (the agent refused the action, see the next section). For a restart, the result arrives when the rollout has started, not when it has completed; rollout status is a possible later improvement.
 
+**Progress.** A long action (today only `drain`) reports its progress while it runs with `POST /v1/agent/actions/{id}/progress`:
+
+```json
+{
+  "updated_at": "2026-09-30T10:03:12Z",
+  "message": "draining worker-3: 14 pods evicted, 2 remaining",
+  "details": {
+    "evicted": 14,
+    "remaining": 2,
+    "blocked": [{ "pod": "payments/api-7f9c", "reason": "PodDisruptionBudget" }]
+  }
+}
+```
+
+`details` depends on the action type; for `drain`, `blocked` lists at most 20 pods the agent cannot evict yet. The agent sends the first progress right after the cordon, then whenever the counts change (at most once every 5 seconds) and at least every 30 seconds. Progress is never retried: the next one is newer.
+
+The backend answers `200` (empty body), stores the progress for the dashboard and renews the action's lease (see the states below). `409` or `410` mean the backend no longer tracks the action (expired or cancelled): the agent stops it, with no further evictions, leaves the node cordoned and sends no result. `404` means the backend does not support progress: the agent stops sending it for that action and goes on.
+
+**Resume.** When the drain starts, the agent writes the annotation `thumbops.mobiletechnologies.cloud/drain-in-progress` on the node, in the same patch as the cordon, with the `action_id`, the start time and the parameters. If the agent restarts, it finds the annotation and resumes the drain with the time left, without a new claim: it sends progress and the result for the same `action_id`, which the backend accepts while the action is `claimed`. The annotation is removed in the patch that writes the result, or when the backend answers `409`/`410` to the progress.
+
 | State | Set by | Meaning |
 | --- | --- | --- |
 | `requested` | Backend | Requested from the app, waiting for approval if needed |
 | `approved` | Backend | Ready, visible to the agent until `expires_at` |
 | `claimed` | Agent (claim) | Running |
 | `succeeded` / `failed` / `rejected` | Agent (result) | Finished |
-| `expired` | Backend | Not claimed before the deadline, or claimed without a result within 5 minutes |
+| `expired` | Backend | Not claimed before the deadline, or claimed and then 5 minutes without a result or a progress (each progress renews the lease) |
 | `cancelled` | Backend | Canceled by the user before the claim |
 
 Every state change produces an audit log entry and a notification to the user who requested the action.
@@ -178,7 +198,7 @@ The agent does not blindly trust the backend: it runs only actions that its own 
 
 **Idempotency.** Every action is identified by `action_id`. The agent annotates the modified resource with `thumbops.mobiletechnologies.cloud/last-action-id`: if it finds that ID already there, it does not repeat the action and sends the result again. This covers the case where the agent restarts between execution and sending the result.
 
-In the prototype the annotation with the ID and a second annotation with the result (`thumbops.mobiletechnologies.cloud/last-action-result`) are written in the same patch that applies the change, so a change can never exist without the trace that makes it idempotent. The drain is the exception: it is made of several steps and writes the annotation only at the end, but repeating it on an already drained node has no effect.
+In the prototype the annotation with the ID and a second annotation with the result (`thumbops.mobiletechnologies.cloud/last-action-result`) are written in the same patch that applies the change, so a change can never exist without the trace that makes it idempotent. The drain is the exception: it is made of several steps. It marks the node with the `drain-in-progress` annotation in the cordon patch and writes the result annotations, removing the in-progress one, only at the end; repeating it on an already drained node has no effect.
 
 **Errors and retries.**
 
@@ -246,5 +266,4 @@ The agent collects the data with client-go informers (watch), without querying t
 ## Open questions
 
 - Merge heartbeat and polling into a single call to halve the requests, or keep them separate for simplicity?
-- A drain can take minutes: is an intermediate result (`progress`) needed, or is a longer timeout for that action type enough?
 - Where does the CA that signs agent certificates live: AWS Private CA (fixed monthly cost) or a self-managed CA with the key in KMS?

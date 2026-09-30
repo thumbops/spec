@@ -313,6 +313,56 @@ paths:
         '429': { $ref: '#/components/responses/TooManyRequests' }
         5XX: { $ref: '#/components/responses/ServerError' }
 
+  /v1/agent/actions/{action_id}/progress:
+    post:
+      tags: [actions]
+      operationId: sendProgress
+      summary: Report the progress of a claimed long action
+      description: |
+        Sent for long actions only (today `drain`): right after the cordon,
+        then when the counts change (at most once every 5 s) and at least
+        every 30 s. Never retried. Each accepted progress renews the lease of
+        the claimed action (5 minutes). Also sent after an agent restart for
+        a drain it resumes, without a new claim.
+      parameters:
+        - $ref: '#/components/parameters/UserAgent'
+        - $ref: '#/components/parameters/ActionID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Progress' }
+            example:
+              updated_at: '2026-09-30T10:03:12Z'
+              message: 'draining worker-3: 14 pods evicted, 2 remaining'
+              details:
+                evicted: 14
+                remaining: 2
+                blocked:
+                  - { pod: payments/api-7f9c, reason: PodDisruptionBudget }
+      responses:
+        '200':
+          description: Progress recorded and lease renewed. Empty body.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Unknown action, or progress not supported. The agent stops sending progress for this action and goes on.
+          content:
+            text/plain:
+              schema: { type: string }
+        '409':
+          description: The action is not claimed by this agent. The agent stops the action and sends no result.
+          content:
+            text/plain:
+              schema: { type: string }
+        '410':
+          description: The action expired or was cancelled. The agent stops the action, leaves the node cordoned and sends no result.
+          content:
+            text/plain:
+              schema: { type: string }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        5XX: { $ref: '#/components/responses/ServerError' }
+
 components:
   securitySchemes:
     bootstrapToken:
@@ -545,7 +595,22 @@ components:
           description: Human-readable outcome, shown in the app.
         details:
           type: object
-          description: Action-specific data, for example `previous_replicas`, `evicted_pods`, `remaining_pods`, `replayed`.
+          description: Action-specific data, for example `previous_replicas`, `evicted_pods`, `remaining_pods`, `replayed`, `agent_pod_left`.
+
+    Progress:
+      type: object
+      required: [updated_at, message]
+      properties:
+        updated_at: { $ref: '#/components/schemas/Timestamp' }
+        message:
+          type: string
+          description: Human-readable progress, shown in the app.
+        details:
+          type: object
+          description: |
+            Action-specific data. For `drain`: `evicted` and `remaining`
+            (integers) and `blocked`, at most 20 objects with `pod`
+            (`namespace/name`) and `reason`.
 
     ClusterStatus:
       type: object
